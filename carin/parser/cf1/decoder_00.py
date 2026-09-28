@@ -256,7 +256,7 @@ def _sections_end(ctx: Cf1Context) -> int:
     return hi
 
 
-def dec_text(ctx: Cf1Context) -> None:
+def dec_text(ctx: Cf1Context, floor: int | None = None) -> None:
     """pbp+0x4862 — blob dei nomi, codice a prefisso + dizionario di blocco.
 
     The DB-REL >= 23 pass ends with two optional dec_text calls whose flag
@@ -266,6 +266,9 @@ def dec_text(ctx: Cf1Context) -> None:
     already-decoded geometry (section 7 shape points turn into repeated "aa",
     0x6161). The bits are still consumed exactly as before, so the stream
     stays aligned; only the writes are suppressed.
+
+    `floor` is the first byte the blob may be written at. It defaults to the
+    end of the type 0x00 sections; other block types pass their own.
     """
     pb = ctx.ptrbits
     start = ctx.g(pb)
@@ -276,7 +279,9 @@ def dec_text(ctx: Cf1Context) -> None:
     for _ in range(6):
         n = ctx.g(5)
         words.append(bytes(ctx.g(7) for _ in range(n)))
-    ok = start <= end < len(ctx.dst) and start >= _sections_end(ctx)
+    if floor is None:
+        floor = _sections_end(ctx)
+    ok = start <= end < len(ctx.dst) and start >= floor
     p = start
     while p <= end and p < len(ctx.dst):
         code = ctx.g(2)
@@ -299,6 +304,38 @@ def dec_text(ctx: Cf1Context) -> None:
         if ok:
             ctx.dst[p] = v
         p += 1
+
+
+def enc_text(bw: BitWriter, dst: bytes, start: int, end: int, ptrbits: int) -> None:
+    """Inverse of dec_text: write dst[start..end] (end inclusive) as a name blob.
+
+    No dictionary words are used (all six are empty), so the output can be
+    longer than the original encoder's but decodes to the same bytes. An empty
+    range (end < start) writes the (0, 0) "no blob" marker.
+    """
+    if end < start:
+        bw.put(ptrbits, 0)
+        bw.put(ptrbits, 0)
+        return
+    bw.put(ptrbits, start)
+    bw.put(ptrbits, end)
+    for _ in range(6):
+        bw.put(5, 0)
+    for p in range(start, end + 1):
+        c = dst[p]
+        i = CHARMAP.find(bytes([c]))
+        if 0 <= i < 2:
+            bw.put(2, 0); bw.put(1, i)
+        elif 2 <= i < 6:
+            bw.put(2, 1); bw.put(2, i - 2)
+        elif 6 <= i < 14:
+            bw.put(2, 2); bw.put(3, i - 6)
+        elif 14 <= i < 14 + 0x1C:
+            bw.put(2, 3); bw.put(7, i - 14)
+        elif 0x26 < c < 0x80:
+            bw.put(2, 3); bw.put(7, c)
+        else:
+            raise Cf1Error(f"name blob byte {c:#04x} at {p:#x} has no CF=1 text code")
 
 
 def decode_type00(ctx: Cf1Context) -> None:
