@@ -297,7 +297,7 @@ parameterizes the CF=1 decoder** — see [`04-cf1-codec.md`](04-cf1-codec.md) §
 >    - Hardcodes which section indices to use for rendering blocks:
 >      - `0x00`: `T[0x05]`, `T[0x06]`, `T[0x08]`, `T[0x09]`, `T[0x0B]`, `T[0x0C]`, `T[0x0F]`, `T[0x10]`, `T[0x12]`, `T[0x13]`, `T[0x14]`, `T[0x15]`, `T[0x40]`, `T[0x4C]`, `T[0x59]`.
 >      - `0x0E`: `T[0x2B]`, `T[0x2D]`, `T[0x41]`, `T[0x42]`, etc.
->      - `0x14`, `0x15`, `0x16`: `T[0x3A]`, `T[0x3B]`, `T[0x3C]`, `T[0x3D]`, `T[0x3F]`.
+>      - `0x14`–`0x16`, `0x1C`–`0x1E`: `T[0x05]`, `T[0x15]`, `T[0x3A]`, `T[0x3B]`, `T[0x3C]`, `T[0x3D]`, `T[0x3F]`, `T[0x59]`.
 >    - **Non-rendering blocks (`0x10`, `0x12`, etc.)**: In the dispatcher at `0x3698`, blocks `> 0x0E` not handled by dedicated decoders branch to `0x36d2`. Here, `pbp` calculates `size = sectors * 2048`, sets `val = 0`, and calls `bsr.w $6a06` (`memset(dest, 0, size)`), simply zeroing the buffer because the map renderer does not draw them.
 >
 > 2. **Routing Engine (`rpmod`)**:
@@ -362,26 +362,32 @@ S2 record layout: `+0` i32 X, `+4` i32 Y = centre of the linked `0x00` tile;
 `+22` u16 SECTION_4 record count. S0 `A` points to the street name and `C` (if
 non-zero) to a locality. See `03-road-network.md` §6.3.1.
 
-#### BLOCK_TYPE `0x14` / `0x15` / `0x16` — geo labels (CF=1 / CF=0)
+#### BLOCK_TYPE `0x14`–`0x16`, `0x1C`–`0x1E` — scale layers (CF=0 / CF=1 / CF=2)
 
-N = 6 descriptor entries (`e0..e5`). Bbox at offset `0x20`. All three types share
-the decoder at `pbp+0x46aa`. Source: `carin/parser/cf1.py`, CC-93 `pbp`,
-`scripts/oracle_14_16.py` (1,958/1,958 S1 records with X/Y in European range ✅).
+N = 6 descriptor entries (`e0..e5`). Bbox at offset `0x20`. The RoadRunner CF=1
+dispatcher sends all six types to one decoder (`db_pub` `sub_004b88`, see
+[`04-cf1-codec.md`](04-cf1-codec.md) §9.11.11). Source: `carin/parser/cf1/decoder_14.py`;
+oracle `scripts/routing/oracle_14_16.py` passes on every block of these types on
+CD-IDs 21708 and 21734, whatever the `COMPRESSION_FLAG`.
 
-| slot | section_type | record_size | sources |
-|---|---:|---:|---|
-| prologue (verbatim) | `0x3d` | 52 B | `T_PROLOG_141516=0x3d`, `pbp+0x46b6`, RST[0x3d]=52 |
-| S0 (`e0`) | `0x3b` | 4 B | `T_REC_S0_141516=0x3b`, `pbp+0x46f4`, RST[0x3b]=4, CF=0 empirical |
-| S1 / geo (`e1`) | `0x3a` | 20 B | `T_REC_S1_141516=0x3a`, `pbp+0x4712`, RST[0x3a]=20, oracle ✅ |
-| S2 (`e2`) | `0x3c` | 16 B | `T_REC_S2_141516=0x3c`, `pbp+0x4732`, RST[0x3c]=16, CF=1 empirical |
-| S3 (`e3`) | — | 4 or 8 B | record size selected at decode time via `T[0x3f]`; section_type not determined |
-| S4 (`e4`) | — | — | CF=0 blocks show `cnt=0` |
-| S5 (`e5`) | — | text | name blob (variable-length Latin-1 strings) |
+| slot | table id | record | records | written by |
+|---|---:|---:|---|---|
+| prologue (verbatim) | `0x3d` | 52 B | — | header, descriptor, bbox `0x20`, `0x30` u16 S3 selector, `0x32` u16 S3 shift |
+| S0 (`e0`) | `0x3b` | 4 B | count + 1 | category, draw flag, S1/S2 offset (`02-geo.md` §8.4) |
+| S1 (`e1`) | `0x3a` | 20 B | count + 1 | areas: name, S3 offset, u32, X, Y, `+0x10` (0), `+0x12` e5 offset |
+| S2 (`e2`) | `0x3c` | 16 B | count + 1 | lines: name, S3 offset, u32, `+8` e4 offset, `+0x0a` u16, `+0x0c` e5 offset, `+0x0e` u16 |
+| S3 (`e3`) | — | 4 or 8 B | count | vertices: 4 B local `u16 x, y` (shift = u16 at `0x32`) when u16 at `T[0x05]+T[0x3f]+0x10` ≠ 0, else 8 B absolute `i32` |
+| e4 | `0x15` | 6 B | count | 3 × u16 (DB-REL ≥ 20 pass) |
+| e5 | `0x59` | 4 B | count | name offset, u8, u8 (5 bits) (DB-REL ≥ 23 pass) |
+| text | — | — | — | NUL-terminated strings after the last section |
 
-`T[0x3f]`=24 (`T_S3_DISP_141516`) is a structural parameter selecting S3's
-record-kind (`kind=0x09` → 4 B, `kind=0x0a` → 8 B); it is not a section record
-size. S1 records carry `NAME_PTR(u16)`, `ptr_s3(u16)`, `UNKNOWN(u32)`, `X(i32)`,
-`Y(i32)`, `UNKNOWN(u16)`, `ptr(u16)` — see `02-geo.md` §8.2 for the full layout.
+The last record of S0, S1 and S2 is a terminator: S0's points at the end of the
+last of S1/S2, S1/S2's S3 offset is the end of S3, and its name and X/Y are 0. On
+every CF=0 and CF=2 block of both DVDs (20,227 blocks) S3 records are
+4 B (shift 6 for `0x16`, 7 `0x15`, 8 `0x1C`, 9 `0x14`, 10 `0x1D`, 11 `0x1E`), and
+S1 `+8/+12` X/Y is a point on the disc but often outside the block's own bbox.
+The value 4 in S1 `+0x12` / S2 `+0x0c` (below the prologue, so no section) means
+"no e5 record".
 
 #### Types with empirical record sizes only (no CF=1 decoder — `[HYP]`)
 
@@ -694,17 +700,15 @@ CF=1 blocks use a dedicated prefix encoder — see [`04-cf1-codec.md`](04-cf1-co
   `0xF6 = ö` ("österreich"), `0xEB = ë` ("belgië"), `0xF1 = ñ` ("españa"), `0xED = í`.
 * All strings are **lowercase** (uppercase rendering is done by firmware).
 * Terminator: `0x00`. Strings are packed into contiguous blobs at block end.
-* Retrieval: records point to the blob with a 32-bit `NAME_PTR`
-  (`high16` = segment, `low16` = offset within segment) or with a `u16` relative to
-  the current block (used in `0x0C`/`0x0E` parcels).
+* Retrieval: records point to the blob with a `u16` offset relative to the current block
+  (used in `0x0C`/`0x0E` parcels).
 
-> **RESOLVED**: `NAME_PTR` `high16` corresponds to the lower 16 bits of a type `0x0D` `BLOCK_ID`.
-> - `NAME_PTR >> 16` gives the block ID (lower 16 bits). There are 10 `0x0D` blocks in sectors 17..406. For example, `0x9A30` maps to `BLOCK_ID` `0x00009A30` (sector 154, length 48).
-> - `NAME_PTR & 0xFFFF` gives the byte offset inside the uncompressed `0x0D` block.
-> - The `0x0D` block contains an 8-byte record at that offset: `>IHH` (`target_block_id`, `metadata`, `target_offset`).
-> - The target block (e.g., `0x0C`) contains the actual municipality/string data. The 44 country names are additionally cached in `0x0A` for faster UI rendering.
->
-> ⚠️ **CRITICAL VULNERABILITY**: Because the `BLOCK_ID` format is `(sector << 8) | length`, taking only the lower 16 bits (`bid & 0xFFFF`) effectively computes `((sector & 0xFF) << 8) | length`. This means **the upper bits of the sector number are lost**! For sectors > 255 (e.g., sector 304 / `0x0130`), the `high16` will be truncated (e.g., `0x302F`), making it impossible to reconstruct the full sector number in O(1) time. To resolve a `NAME_PTR`, a parser **must** pre-scan the volume to build a lookup table mapping the truncated 16-bit IDs to the full 32-bit `BLOCK_ID`s of all `0x0D` blocks.
+> **RESOLVED (2026-09-28, PR #13)**: there is no 32-bit `NAME_PTR` with a segment half. The
+> country record in `0x0A` starts with a `u32 BLOCK_ID`, `u16 offset`, `u16 count`: the root of the
+> country's `0x0D` city-name trie (§4.4, §4.4.1). Read at `+0x02`, those bytes look like
+> "`high16` = low 16 bits of a `0x0D` `BLOCK_ID`, `low16` = offset", which is where the earlier
+> "segments" (`6C2E 9A30 F931 CA2F 112E 12A6`) and the "16-bit truncation vulnerability" came
+> from. Read at `+0x00` the `BLOCK_ID` is complete (87 / 87 roots are `0x0D` blocks on DVD 21708).
 
 ```python
 def carin_str(buf: bytes, off: int) -> str:

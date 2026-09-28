@@ -3,8 +3,8 @@
 > **Status: ✅ VERIFIED (STEP 2 & 3 complete, 2026-09-19).** Block/section structure
 > AND field semantics for `0x0E` are fully verified from firmware traces (S0 `A`/`C` and
 > the S2 fields were reinterpreted from disc data on 2026-09-27: §6.3.1). Spatial
-> lookup via `find_parcel(vol, X, Y)` oracle 10/10 PASS. `0x0D`/`0x0F`/`0x11` = TEXT
-> address-lookup index (not spatial). Type `0x00` field semantics are now KNOWN (map drawing). Types `0x01`–`0x03` are assumed identical.
+> lookup via `find_parcel(vol, X, Y)` oracle 10/10 PASS. `0x0D`/`0x0F`/`0x11` = name
+> tries for letter-by-letter search (not spatial, §6.3.2). Type `0x00` field semantics are now KNOWN (map drawing). Types `0x01`–`0x03` are assumed identical.
 >
 > Source: `../CARINDB_BLUEPRINT_EN.md` §6. Related: CF=1 decoding for these types →
 > [`04-cf1-codec.md`](04-cf1-codec.md); open goals → [`06-objectives-roadmap.md`](06-objectives-roadmap.md).
@@ -192,6 +192,8 @@ base `0x0E` topology.
     The four "deltas" are **not coordinates**: they are unsigned house-number ranges, and
     there is no sign extension to apply. The anchor table in the pre-header is a per-block
     list of the `0x00` tiles the block links to: `(centre X, centre Y, BLOCK_ID)`.
+    The ranges are the envelope of the per-segment numbers in type `0x04` over the linked
+    run (§6.4).
   - The `is_16` flag is consumed from the bitstream but not stored in the record.
 
 #### `0x0E` is the street-name directory (2026-09-27)
@@ -201,6 +203,7 @@ Checked on CD-IDs 2952, 21594, 21708 and 21734 (`CF=0`, `CF=1` and `CF=2`; `CF=1
 | Check | Result |
 |---|---|
 | S0 `A` points to a NUL-terminated street name in the text after SECTION_2 | 122,743 / 122,743 records (CD-ID 21708, 150 `CF=2` blocks); same on both CDs |
+| Packed (`CF=1`) blocks: the text is a `dec_text` name blob after S2, as in `0x00` (PR #14; before, the decoder never read it and every name came out empty) | S0 name/locality pointers on text: 259,454 / 259,454 over all 563 `CF=1` blocks of CD-ID 21708; every stream ends within a byte of the data end; decode → `encode_type0E` → decode identical from byte 8 in 150 / 150 |
 | S0 records are in alphabetical order of that name | 97% (CD-ID 21708); accented names account for the rest |
 | S0 `C`, when non-zero, points to a locality string (e.g. `haddington road` → `dublin 4`) | 24,137 / 24,137 (CD-ID 21708) |
 | S2 `+16` is the `BLOCK_ID` of a type `0x00` block with that exact length | 100%: 455,974 records (CD-ID 21594, plain), 6,942 (CD-ID 2952), 23,451 (CD-ID 21708, `CF=2`), 23,724 (CD-ID 21734, `CF=2`) |
@@ -224,7 +227,7 @@ reading above that the router never requests `0x00`.
 (see `04-cf1-codec.md` §9.11.7). Read as 13 bits, the `CF=1` `0x0E` blocks of CD-ID 21708
 lose sync at S2 (78% valid tile links, 15% valid house-number pairs); with 15 bits they
 check out 100% on CD-IDs 21708 and 21734, and the CDs stay at 100% with 13.
-`decode_s2_coords` should not be used as geometry.
+`decode_s2_coords` should not be used as geometry; read S2 with `decode_s2_links` (`carin.parser.cf1`).
 
 **S2 coordinate reconstruction** (superseded 2026-09-27: `+8..+14` are house numbers, so
 `anchor + delta` is not a position; kept for reference):
@@ -254,74 +257,79 @@ Oracle: for each non-sentinel record with anchor in block's anchor bbox,
 > Firmware listing: `docs/fw/pbp_0x0E_decoder.asm`. Decoder entry `pbp+0x4320`
 > (= `db_pub+0x1e98`); common section loop `pbp+0x40b0`; S2 handler `pbp+0x41c0`; `$694e` = memmove.
 
-### 6.3.2 Types `0x0D` / `0x0F` / `0x11` — TEXT address-lookup index (NOT spatial)
+### 6.3.2 Types `0x0D` / `0x0F` / `0x11` — name tries (letter-by-letter search, NOT spatial)
 
-**Discovery 2026-09-19** (STEP 3): these blocks were initially suspected to be a geographic
-R-tree for parcel lookup. They are in fact an **alphabetical address index**.
-
-Each block holds an array of **12-byte records** with identical layout:
-
-```
-  Offset  Size  Field  Content
-  +0x00   u32   A      BLOCK_ID of target block (0x0C / 0x0E / 0x10 depending on type)
-  +0x04   u8    B_hi   ASCII code — country / street-type code (e.g. 0x61='a'=Albania)
-  +0x05   u8    B_lo   always 0x01
-  +0x06   u16   C      byte offset into target block's S0 section
-  +0x08   u16   D      record count in that range
-  +0x0A   u16   E      always 0x0000 (padding)
-```
-
-Hierarchy and block counts:
-
-| Type | Blocks | Target type | Semantics |
-|------|--------|-------------|-----------|
-| `0x0D` | 10 | `0x0C` | Country/language codes → record ranges in `0x0C` S0 |
-| `0x0F` | 1,661 | `0x0E` | Street-name codes → record ranges in `0x0E` S0 |
-| `0x11` | 921 | `0x10` | Street-name codes → record ranges in `0x10` S1 |
-
-The `B_hi` code is an ASCII initial: the first `0x0E` block referenced (sector 235755)
-is in Albania because 'a' is the first letter alphabetically. **This is address-lookup by
-street name, not geographic proximity**. Do NOT use `0x0D`/`0x0F`/`0x11` for spatial
-parcel lookup — use `scripts/find_parcel.py` instead (index from S2 `x_anc`/`y_anc`).
-
-> **NAME_PTR Connection & 16-bit Truncation**:
-> The 44 country records in block `0x0A` (Section 1) store a 32-bit `NAME_PTR` pointing into these `0x0D` blocks:
-> - `high16` = `BLOCK_ID & 0xFFFF` of a `0x0D` block (`((sector & 0xFF) << 8) | length`).
-> - `low16` = byte offset into the uncompressed `0x0D` block.
-> - **Truncation Vulnerability**: For sectors > 255 (4 out of 10 `0x0D` blocks in `NAV_DB_21708.ISO`), the upper byte of the sector is discarded. Resolving `NAME_PTR` without a pre-scanned lookup table of `0x0D` blocks is impossible.
-> - The record pointed to in `0x0D` links to an administrative `0x0C` parcel node. For UI display, human-readable country names are directly cached in `0x0A`.
-
-### 6.4 Type `0x04` (80,825 blocks) — House Number Range Index ✅ RESOLVED 2026-09-21
+Letter tries behind the destination entry, in the 12-byte record format of `0x0B`. Full
+description (roots, leaf targets, `0x0C` city record, the rule the original compiler used to
+build `0x0F`, rename tests on a CNI1): [`01-architecture.md`](01-architecture.md) §4.4.1 (PR #13).
 
 ```
-+0x08 SECTION_DESCRIPTOR[1] = {0x0010, N}    ; N = record count (varies per block)
-+0x0C SERVICE_DATA = BLOCK_ID of associated 0x00 map tile (4 bytes)
-+0x10 SECTION_0: N records of 8 bytes = 4 × u16
-      [f0 f1 f2 f3]  sentinel = 0x7FFF ("no houses on this side")
+  +0x00   u32   BLOCK_ID of the next level (leaf = 0) or of the target block (leaf = 1)
+  +0x04   u8    letter   '@' (0x40) = the name ends here
+  +0x05   u8    leaf     0 = inner node, 1 = leaf
+  +0x06   u16   offset   of `count` records in that block (trie records, or target records)
+  +0x08   u16   count
+  +0x0A   u16   flags    0 (0x0100 on 0x11 alias records, e.g. IATA codes)
 ```
 
-**Field semantics** (verified from rpmod.asm subroutine `0x014134`):
+| Trie | Blocks (21708) | Root | Leaves point to |
+|------|--------|------|-----------------|
+| `0x0D` city names | 10 | `0x0A` country record `+0x00` (u32 `BLOCK_ID`, u16 offset, u16 count) | `0x0C` city records |
+| `0x0F` road names | 1,661 | `0x0C` city record section 1 `+0x00` | `0x0E` S0 street records |
+| `0x11` POI names | 921 | `0x0A` section 3 / `0x0C` section 3 (per category) | `0x10` POI records |
 
-| Field | Meaning |
+The whole Destination chain is therefore: country (`0x0A`) → `0x0D` → city (`0x0C`) → `0x0F` →
+street (`0x0E` S0) → S2 link → segment run in a `0x00` tile (§6.3.1) → house number per
+segment (`0x04`, §6.4).
+
+**Checked on DVD 21708 (2026-09-28)** by walking the tries from both `0x0A` blocks (PR #13 checked
+the CDs): 87 / 87 country roots are `0x0D` blocks; 424 / 424 sampled city leaves point to `0x0C`;
+24,944 / 25,114 city names start with their leaf's prefix (the rest are Danish `ø`/`æ`, which the
+check's accent folding does not map to `o`/`ae`); 423 / 424 cities root a `0x0F` trie; 2,006 /
+2,006 road leaves point to `0x0E`; 15,761 / 15,763 street names (packed blocks decoded with
+the name blob, see §6.3.1) start with their prefix.
+
+**Superseded readings.** "`B_hi` = ASCII country/street-type code, `B_lo` always `0x01`" is the
+letter and the leaf flag. The "32-bit `NAME_PTR`" in `0x0A` with its "16-bit truncation
+vulnerability" came from reading the country record at `+0x02` instead of `+0x00`: `+0x02` u32 is
+the low half of the `BLOCK_ID` followed by the offset. Read at `+0x00`, the `BLOCK_ID` is complete
+and nothing is truncated. These tries are still not a spatial index (spatial lookup: `0x07`–`0x09`,
+`02-geo.md` §7.3).
+
+### 6.4 Type `0x04` (80,825 blocks) — per-segment house numbers ✅ VERIFIED on disc 2026-09-28
+
+```
++0x08 SECTION_DESCRIPTOR[1] = {0x0010, N}   ; N = SECTION_4 count of the linked tile
++0x0C BLOCK_ID of the linked type 0x00 tile
++0x10 SECTION_0: N records of 10 bytes = 5 × u16
+      [f0 f1 f2 f3 f4]   sentinel 0x7FFF = no number
+```
+
+Checked on CD-ID 21708 (all 80,114 `CF=2` and 711 `CF=0` blocks; `scripts/routing/check_04_house_numbers.py`):
+
+| Check | Result |
 |---|---|
-| `f0` | House number range start, Street Side A |
-| `f2` | House number range end, Street Side A |
-| `f1` | House number range start, Street Side B |
-| `f3` | House number range end, Street Side B |
+| `+0x0C` is the `BLOCK_ID` (sector and length) of a type `0x00` tile | 80,825 / 80,825; no tile has two `0x04` blocks. The other 10,931 `0x00` tiles have none |
+| Record `i` belongs to SECTION_4 segment `i` of that tile | record count = tile e4 count, 200 / 200 tiles sampled |
+| `(f0, f2)` and `(f1, f3)` are the two sides of the segment | a side is either both `0x7FFF` or both set; same parity within a side 94%, opposite parity between the sides 84% (`f4` = 2 accounts for the exceptions below) |
+| `f4` = numbering scheme | 0: no numbers (22,793,560 records, all empty); 2: odd/even split, one parity per side (15,059,361 with numbers, 99.8% single parity per side); 1: mixed, a side runs through both parities (1,440,795 of 2,097,923 have mixed parity within a side) |
+| `0x0E` S2 even/odd ranges (§6.3.1) = envelope of the `0x04` ranges of the linked SECTION_4 run | 29,140 / 29,496 links (98.8%, 60 `0x0E` blocks); a scheme-1 side contributes both parities of its interval. The rest differ at one end of a mixed-scheme run |
 
-- Side A and Side B correspond to the two sides of the street segment.
-- `f0` and `f2` always share the same parity (both odd, or both even); same for `f1`/`f3`.
-- `btst #$0` on the query house number selects which parity side to search.
-- Fill-in rule: if `f0 = 0x7FFF` → `f0 := f2`; if `f2 = 0x7FFF` → `f2 := f0` (symmetric default); same for `f1`/`f3`.
-- Range check: `min(f0,f2) ≤ query ≤ max(f0,f2)` → returns byte offset of the matched street segment record in the associated `0x00` primary block.
+So `0x04` is the fine-grained data (numbers at each end of each side of each segment) and `0x0E`
+S2 is a per-link summary of it, used to pick the street run from the address search. Not
+checked: which side is left or right of the segment direction, and whether `f0`/`f1` belong to
+the start node and `f2`/`f3` to the end node.
 
-**Firmware evidence:**
-- `rpmod.asm` factory-default subroutine `0x01af8a`, line 31577: `move.w #$8, -$7e7a(a6)` — record size = 8 bytes.
-- Subroutine `0x014134` (lines 22792–22952): full range-lookup implementation; parity check at `0x014226`; fill-in at lines 22840–22859; min/max at 22882–22895; range test at 22937–22952.
-- Wrapper `0x013272` (line 21640): copies house-number query from `$42(a7)` → local struct offset `$1e` (`0x01329c`), then calls `0x01456c` → `0x014658` → `bsr $14134`.
-- Empirical check: all high-range field values sampled from sector 5781092 (95, 103, 105, 109, 111, 113) are ODD integers — consistent with one side of an odd-numbered street.
-
-**Linkage**: each `0x04` block is linked to its parent `0x00` map-tile block via `SERVICE_DATA` at `+0x0C`. The routing engine (`rpmod`) uses this block to resolve a house-number query to the byte offset of the street segment record inside the map tile.
+**CC-93 firmware (hint, not the DVD reader).** `rpmod` sets the record size with
+`move.w #$8, -$7e7a(a6)` (factory-default subroutine `0x01af8a`, line 31577), i.e. 8-byte
+records with four fields: the DVD format has a fifth field. Its lookup, subroutine
+`0x014134` (lines 22792–22952), matches the side pairing above: `btst #$0` on the query
+number picks a side (`0x014226`); fill-in `f0 := f2` if `f0 = 0x7FFF` and vice versa, same for
+`f1`/`f3` (lines 22840–22859); range test `min ≤ query ≤ max` (lines 22882–22952), returning
+the offset of the matching segment in the linked `0x00` tile. Caller chain: `0x013272`
+(line 21640) copies the query from `$42(a7)` to local `$1e`, then `0x01456c` → `0x014658` →
+`bsr $14134`. The earlier reading of this block as "160 records of 10 bytes, meaning unknown"
+(blueprint §6.4) had the right size; 160 was one block's count.
 
 ### 6.5 Type `0x06` (2,688 blocks) — POI
 
@@ -366,21 +374,23 @@ S7 is a sequence of 6-byte records.
 The firmware evaluates this flag to determine if the turtle graphics cursor should move (Pen-Up, e.g. starting a new line) or draw (Pen-Down, continuing the polyline). This flag breaks the sequence into individual street curves and correctly manages line continuity.
 
 **Section 1 (Bounding Box / Geometry Limits):**
-S1 (e1) is an array of 24-byte structs. Firmware C decompilation (dbq/pbp_clean.c) proves it parses identical to  x0E S2 records:
-- Reads a flag: if  , populates four int16 fields with  x7FFF (sentinel for no geometry).
+S1 (e1) is an array of 24-byte structs. Firmware C decompilation (dbq/pbp_clean.c) proves it parses identical to 0x0E S2 records:
+- Reads a flag: if 0, populates four int16 fields with 0x7FFF (sentinel for no geometry).
 - If 1, it reads four int16 bounds (likely Delta X/Y bbox limits).
-- Then it reads a uint16 (shifted left by 1) and a second uint16, mirroring exactly the al1 and al2 fields of  x0E S2.
+- Then it reads a uint16 (shifted left by 1) and a second uint16, mirroring exactly the val1 and val2 fields of 0x0E S2.
 This acts as spatial filtering to cull BSP branches without iterating S7 points.
 
 **Firmware Dispatcher Architecture (The "Magic Numbers" Myth):**
-Values previously thought to be internal section IDs (like  x24,  x28,  x2A,  x2C) are actually **direct byte offsets into the  x00 block header**.
-- The  x00 block has an 8-byte header, followed by the SECTION_DESCRIPTOR array (offset, count).
-- E.g.,  x28 is 8 + 8 * 4 = 40, which is the exact byte offset of the e8 descriptor's offset field.  x2A is the count field.
-- The C firmware explicitly does *(ushort *)(in_D0 + 0x28) to read the array pointer, meaning the layout of  x00 is rigidly hardcoded, relying on these structural header offsets rather than runtime switch-cases.
+Values previously thought to be internal section IDs (like 0x24, 0x28, 0x2A, 0x2C) are actually **direct byte offsets into the 0x00 block header**.
+- The 0x00 block has an 8-byte header, followed by the SECTION_DESCRIPTOR array (offset, count).
+- E.g., 0x28 is 8 + 8 * 4 = 40, which is the exact byte offset of the e8 descriptor's offset field. 0x2A is the count field.
+- The C firmware explicitly does *(ushort *)(in_D0 + 0x28) to read the array pointer, meaning the layout of 0x00 is rigidly hardcoded, relying on these structural header offsets rather than runtime switch-cases.
 
 ### 6.7 Types `0x00`–`0x03` — Road Graph (routing) (2026-09-28)
 
 Types `0x00`–`0x03` form a routable road graph. `0x00` is the street level and `0x01`–`0x03` are coarser levels of the same network. Everything below was checked on disc data from CD-IDs 2952, 21594, 21708 and 21734 (sample sizes given per row). Rows marked **FW** are also confirmed in the Philips CARIN CC-93 firmware (`dbq/rpmod.asm`, `(c) PHILIPS,Eindhoven CARIN CC-93 system`, 1993, OS-9/68K, taken from a BMW update disc), where the route planner reads these fields from segment records at the same offsets. The CC-93 is a sibling of the units that read these discs, not their own firmware (e.g. the Renault CNI1's firmware is not in the repo), so **FW** means "an older CARiN route planner reads the field this way".
+
+> **RR firmware (2026-09-28).** The route planner of the unit that actually reads the DVDs (VDO Dayton RoadRunner, `bsw2` `rpmod`, MIPS) unpacks this record in `sub_01fd80`. It confirms `+0x00`/`+0x02`, `+0x0B` (form, direction, **toll**), `+0x0C`, `+0x0E`/`+0x0F`, `+0x10` (class, subtype), `+0x11` (the same car-access rule as `can_traverse`), the slip role (`+0x18 & 3` on DB-REL ≥ 27, else from `+0x0B`; `+0x18` of packed tiles comes from pass `0x1B`, `04-cf1-codec.md` §9.11.12), and reads **section 10 via `+0x12`** and section 12 via `+0x14`. It also reads fields not explained here: `+0x10` bit 7, `+0x1D` bits 4–6 and `+0x18 & 0x10` (DB-REL ≥ 27). See [`../fw/04-rr-rpmod-edge-record.md`](../fw/04-rr-rpmod-edge-record.md).
 
 **Segment record (section 4, record `T[0x08]`: 32 B on DB-REL 34, 30 B on DB-REL 22):**
 
@@ -403,18 +413,13 @@ Types `0x00`–`0x03` form a routable road graph. `0x00` is the street level and
 | `+0x12` → section 10 | start of this segment's **forbidden turns** (see below) | monotone in 108 / 108 tiles |
 | `+0x14` → section 12 | TMC location references (DVD only, see below) | |
 | `+0x16` → section 13 | **toll points** (DB-REL 34; see below) | every segment of a tile holds the same offset when the section is empty |
-| `+0x18` | u16, high byte only (`0x0100`–`0x0400`, `0x1000`). Values: 1, 2, 3 = the segment's slip role, repeating `+0x0B` form 1/8, 2/9, 3/0xA; 4 = about a third of class 6 subtype 1 roads (mostly tracks, service roads and farm lanes in OSM; meaning unclear); `0x10` = rare, on main roads, sometimes combined with a slip role (`0x11`, `0x13`). Plain (`CF=0`) tiles store it in the record. **Packed tiles store it in an extra pass after pass `0x17`**, which neither `decoder_00.py` nor any firmware we have (Mk3 0103–0127, RR 0101–0103) reads; see "Packed tiles: the `+0x18` pass" below | plain, CD-ID 21594, all 1,114 plain `0x00` tiles: 236 / 236 tiles with slip roads mark every slip segment; 613 / 1,998 subtype-1 class 6 segments carry 4. Packed: the same values in 873 / 1,000 sampled tiles. DVD 21708: non-zero on 147 of 30,264 sampled segments |
+| `+0x18` / `+0x19` | two bytes; `+0x19` is 0 on every segment of every tile checked. `+0x18`: 1, 2, 3 = the segment's slip role, repeating `+0x0B` form 1/8, 2/9, 3/0xA; 4 almost only on class 3–6 (plain DVD tiles: 5 of 393,203 on classes 0–2; mostly class 5 and class 6 subtypes 1, 3, 4, 5; on CD-ID 21594 about a third of class 6 subtype 1, mostly tracks, service roads and farm lanes in OSM; meaning unclear); 5–7 rare; `0x10` rare, on main roads, sometimes combined with a slip role (`0x11`–`0x13`, one `0x14`). Plain tiles store it in the record; packed tiles in pass `0x1B`, see "Packed tiles: pass `0x1B`" below. **RR**: `rpmod sub_0630cc` takes the slip role from `+0x18 & 3` on DB-REL ≥ 27, `sub_01fd80` also reads `+0x18 & 0x10` | Plain, CD-ID 21594 (1,114 tiles): 236 / 236 tiles with slip roads mark every slip segment. Plain DVD tiles (`pass18_baseline.py`): non-zero on 185,496 / 2,643,784 segments (21708) and 298,577 / 3,791,013 (21734); every segment with a slip form in `+0x0B` has the same role in `+0x18 & 3`; the reverse fails on 2,855 and 9,290 segments (role only in `+0x18`; `& 3` = 3 on 2,727 and 8,909 of them). Packed (all CF=1 tiles): 39,740,445 / 39,760,087 and 42,257,406 / 42,299,606 agree, same one-way exceptions |
 | `+T[0x09]` → section 2 | road name and locality | `03-road-network.md` §6.3.1 |
 | `+T[0x09]+2` hi (`+0x1C`) | bit 4 always set; **bit 3 = bridge**; bits 1–2 (value `0x16`) on stretches of motorway/trunk/main roads; bit 0 on a few tunnels (`0x1D`) | bit 3: 80% of OSM `bridge` segments vs 1% of the rest. `0x16`: 41% of motorway segments (M621, M50, Leeds Inner Ring Road, M1), 6% of trunk; meaning unknown |
 | `+T[0x09]+3` (`+0x1D`) | bit 7 = built-up area (same as `+0x0A` bit 7); bits 1–2 ≈ **width / lane category**: 0 one-lane one-way, 1 ordinary road, 2 wide one-way (motorway carriageway), 3 wide two-way (4+ lanes); bit 0 unexplained (mostly set on residential streets) | vs OSM `lanes`: one-way 1 lane → 0 (63%); two-way 1–2 lanes → 1 (92–94%); motorway → 2 (89%); two-way 5 lanes → 3 (61%). Coarse, not a lane count |
 | `+T[0x09]+4` → section 11 | **signposts** (see below) | |
 
-**Packed tiles: the `+0x18` pass (DB-REL 34).** The packed `0x00` stream does not end after pass `0x17`. Three parts follow:
-1. A head of unknown content: median 18 bits, up to about 900. It is at least 2 bits (`00`) and never 3, 4 or 7 bits; every head of 5 bits or more ends in `000`. It sits where the Mk3 reads its two optional text-blob flags, but it can't be those: heads as short as 5 bits start with a 1, and a text blob needs at least 2 × `PTRBITS` bits.
-2. One record per section 4 segment: a flag bit, followed by a new u16 for `+0x18` when the flag is set. When the flag is clear, the segment keeps the previous segment's value. The first segment always has the flag set.
-3. A single 1 bit, then zero padding to the end of the block.
-
-On CD-ID 21594 the pass was located in 873 of 1,000 random packed tiles by search: its start is the first position where the pass ends on the last set bit, gives only known values and marks exactly the slip roads. Only the slip roads were used for the fit. The other values came out on their own and match the plain tiles: `0x0400` on 1,406 class 6 subtype 1 segments and nowhere else, and `0x1000` on a few class 1 and 2 roads. Most of the tiles that don't fit have many segments with form 1 but no slip role (in one tile, all 203 segments); a few have a zero run shorter than the segment count. Both are unexplained. This pass accounts for most of the ~20 B of unexplained data per packed tile. It fits the format's backwards compatibility (§9.11.6 of the blueprint): each DB-REL appends passes and older readers stop early, so the firmware we have never reaches it. Until the head is decoded, a decoder can't find the start of the pass without the search in `local/tools/pass18.py`. CD-ID 2952 (DB-REL 22) has no `+0x18` and no data after pass `0x15`.
+**Packed tiles: pass `0x1B` (DB-REL ≥ 27).** In `CF=1` tiles `+0x18` comes from a fourth pass over section 4 that the RoadRunner reads after pass `0x17` and its two text flags (`db_pub` `sub_005e6c +0x6e70` → `sub_005594` kind `0x1B`, `+0x5b5c`): per segment, no sentinel, a flag bit, then `+0x18` and `+0x19` as two `getbits(8)`, or both copied from the previous segment. The Mk3 builds (0103–0127), from which `decoder_00.py` was ported, have no such pass; RR 0101, 0102 and 0103 all do. After it the stream holds one 1 bit and zeros; no firmware reads that bit. Every `CF=1` `0x00` tile of CD-IDs 21708 and 21734 passes `scripts/codec_cf1/oracle_00.py` with the pass decoded (86,107 / 86,107 and 91,651 / 91,651). The first segment always carries a value and an explicit value never repeats the previous one (300 tiles per disc); segments repeating the previous value: 95.3% / 95.0% packed, 94.7% / 94.5% plain. The "head" of unknown content described here before (median 18 bits on CD-ID 21594, found by search) was not part of the format: the port skipped the pass `0x15` sentinel record, so pass `0x17` and the two text flags were read shifted. In the aligned stream the gap is the two flags, plus a text blob of exonyms when the second is set. Details: `04-cf1-codec.md` §9.11.12. CD-ID 2952 (DB-REL 22) has no `+0x18` and no pass after `0x15`; DB-REL 34 CD-ID 21594 was not rerun here.
 
 On DB-REL 22 (30 B records) there is no `+0x16` section 13 pointer: `+0x14` is the last section pointer, `+0x16` is the always-zero u16, `T[0x09]` = `0x18`, and the flags u16 is at `+0x1A`. On CD-ID 2952 (100 tiles, 15,186 segments) the same fields show the same patterns: class 6 subtypes, `+0x11` 0/5/6/9, the `+0x1A` hi byte 0x10/0x18/0x90, low byte 0x80–0x87. The speed values differ slightly (mostly 13, 17, 22, 31 and 2 instead of 11, 16, 22, 31 and 2). These were not matched to OSM on that disc. Tools: `local/tools/seg4.py` (per-class survey), `seg4osm.py` (OSM matching), `seg4study.py` and `seg4bits.py` (cross-tabs).
 
@@ -430,7 +435,7 @@ On DB-REL 22 (30 B records) there is no `+0x16` section 13 pointer: `+0x14` is t
 - flag 1: at its end node (514 / 542);
 - flags 2 and 3 are rare and not understood.
 
-In central Dublin (CD-ID 21594), 55% of these junctions lie within 15 m of an OSM turn restriction, against 10% for random junctions, and 57% of OSM restriction vias have an entry within 20 m. Using the bearings to classify each entry's turn: at OSM `no_right_turn` junctions 33 of 38 entries are right turns; at `only_straight_on` junctions all listed turns are left or right; at `only_right_turn` junctions they are left turns. Not yet found in the firmware.
+In central Dublin (CD-ID 21594), 55% of these junctions lie within 15 m of an OSM turn restriction, against 10% for random junctions, and 57% of OSM restriction vias have an entry within 20 m. Using the bearings to classify each entry's turn: at OSM `no_right_turn` junctions 33 of 38 entries are right turns; at `only_straight_on` junctions all listed turns are left or right; at `only_right_turn` junctions they are left turns. Found in the RR firmware (2026-09-28): `rpmod` `sub_06322c` reads the range from `+0x12` and `sub_01fd80` splits the entries by flag bit 0 into start-node and end-node lists (≤ 8 each).
 
 **Section 11 (`T[0x13]` = 6 B): signposts.** Pointed to by `+T[0x09]+4`. Each entry is `u16` destination text, `u16` route-number text or 0, and a `u16` flag 0/1. 984 of 985 destination pointers resolve to strings, e.g. `norwich` / `a11`, `bury st. edmunds((a14))`, `london stansted airport`, `((m11))`. Used by 10–11% of class 0–1 segments, ~0% of residential ones (CD-ID 21594).
 

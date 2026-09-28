@@ -9,9 +9,10 @@
 
 These navigation databases were widely used in iconic late 1990s and 2000s automotive systems, including:
 * **BMW Navigation Systems**: MK3 (CD, MIPS32) and MK4 (DVD, Hitachi SH-4) across BMW E46, E39, E38, X5 E53, Z4 E85
+  *(On the BMW update CD `NAV_SW(v32).iso` the DVD database reader and route planner are MIPS32 — the VDO Dayton "RoadRunner" software; see [docs/fw/03-firmware-provenance.md](docs/fw/03-firmware-provenance.md).)*
 * **Renault / Nissan**: Carminat Navigation Informée 1 (CNI1)
 * **VDO Dayton**: PC5000, PC5200, MS5000 series
-* Systems across Opel/Vauxhall, Rover, Land Rover, and others
+* Systems across Opel/Vauxhall, Rover, Land Rover, Volkswagen/Audi and others
 
 Official map updates ceased years ago (mostly frozen around 2015–2019). **The mission of this project is to reverse-engineer the CARiN binary format and build a compiler pipeline that converts modern OpenStreetMap (OSM) data into functional, bootable DVD/CD navigation discs for these classic cars.**
 
@@ -70,8 +71,7 @@ While the foundation is cracked, building a full compiler from OpenStreetMap req
 
 ### 3. Decoder Ports for the Remaining Types 🟠 High
 * Port the bit-packing decoder logic from MIPS firmware (`db_pub`) for the remaining block types into Python (`carin/parser/cf1/`).
-  * Already ported: types `0x00`, `0x0E` and `0x14`–`0x16`.
-  * On CD-ID 21594, the only `COMPRESSION_FLAG = 1` blocks without a decoder are types `0x1C`–`0x1E` (116 blocks).
+  * Already ported: types `0x00`, `0x0E`, `0x14`–`0x16` and `0x1C`–`0x1E` (the last six from the RoadRunner `db_pub`, checked on every block of DVDs 21708 and 21734; not yet run on CD-ID 21594's 116 packed `0x1C`–`0x1E` blocks).
 
 ### 4. OpenStreetMap to CARiN Serializer & ISO Compiler 🟡 Ongoing
 * Pipeline to parse OSM PBF data (`osmium`), partition nodes/ways into 512-byte sector-aligned parcels, compute coordinate transforms, write CARiN block headers, and package a bootable ISO 9660 filesystem.
@@ -84,7 +84,9 @@ Before diving into code, please read the technical blueprints:
 
 * 📖 **[docs/CARINDB_BLUEPRINT_EN.md](docs/CARINDB_BLUEPRINT_EN.md)** 
   * The definitive specification of the format: byte maps, superblock layout, coordinate formulas, bit-packing primitives, and verification roadmap.
-* 💻 **`docs/fw/`**: Disassembled and annotated assembly listings of the original firmware decoder routines (`mips_*.asm` for Mk3 MIPS32, `m68k_pbp_decoders.asm` for CC-93 m68k).
+* 🎯 **[docs/carindb/06-objectives-roadmap.md](docs/carindb/06-objectives-roadmap.md)**
+  * What is decoded per block type, which older conclusions were corrected, and the prioritized open work.
+* 💻 **`docs/fw/`**: Disassembled and annotated assembly listings of the original firmware decoder routines (`mips_*.asm` for Mk3 MIPS32, `m68k_pbp_decoders.asm` for CC-93 m68k). Start with [`03-firmware-provenance.md`](docs/fw/03-firmware-provenance.md): which firmware reads which disc, and the RoadRunner route planner notes in [`04-rr-rpmod-edge-record.md`](docs/fw/04-rr-rpmod-edge-record.md).
 
 ---
 

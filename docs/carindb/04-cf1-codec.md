@@ -1,13 +1,15 @@
 # Part 4 — `COMPRESSION_FLAG = 1` Codec — RESOLVED
 
 > **Status: ✅ RESOLVED — decoder and serializer complete** (2026-09-19).
-> Block types `0x00`, `0x0E`, `0x14`/`0x15`/`0x16` decoded; `0x0E` CF=1 serializer
+> Block types `0x00`, `0x0E`, `0x14`–`0x16` and `0x1C`–`0x1E` decoded (the last six
+> re-transcribed from the RoadRunner firmware on 2026-09-28, §9.11.11; `0x00` completed from it
+> the same day: pass `0x15` sentinel and pass `0x1B`, §9.11.12); `0x0E` CF=1 serializer
 > (`encode_type0E`) oracle 10/10 PASS. No remaining ports needed for routing.
 > For the exhaustive list of *falsified* codec hypotheses (do not re-attempt),
 > read [`05-failed-attempts.md`](05-failed-attempts.md) **before** trying anything here.
 >
 > Source: `../CARINDB_BLUEPRINT_EN.md` §9.11. Firmware listings: `docs/fw/`.
-> Implementation: `carin/parser/cf1.py`.
+> Implementation: `carin/parser/cf1/`.
 
 ---
 
@@ -237,19 +239,20 @@ else:          rec[0x16] = prev[0x16]
 PB_s13 = bits_needed(e13.count + 1)        # byte at -0x65dd($gp)
 ```
 
-**Effective bitstream order** (`db_pub+0x3d04`):
+**Effective bitstream order** (Mk3 `db_pub+0x3d04`; RR `sub_005e6c`, §9.11.12):
 
 ```
-kind 0x14 : dec(e0), dec(e1), dec(e2), dec_B(e4),
-            inline dec_C(e5), dec_D(e6), dec_E(e7), dec_F(e11),
-            if getbits(1): dec_text()
+kind 0x14 : dec(e0), dec(e1), dec(e2), dec_B(e4) + sentinel record,
+            inline dec_C(e5), dec_D(e6), dec_E(e7), dec_F(e11) if e11.count,
+            dec_text()                                   # no flag (RR +0x6a94)
 PB_s13 = bits_needed(e13.count + 1)
-kind 0x15 : dec(e0), dec_B(e4), inline e13 (record T[0x4c]=8: u32, ptr, 2 bytes), ...
-kind 0x17 : dec(e2), dec(e1), dec(e0)
+kind 0x15 : dec(e0), dec_B(e4) + sentinel record,        # Mk3 +0x3c50, RR +0x5db8
+            inline e13 (record T[0x4c]=8: u32, ptr, 2 bytes)
+kind 0x17 : inline e14, dec(e2), dec(e1), dec(e0)
 if getbits(1): dec_text()
 if getbits(1): dec_text()
-# DB-REL 34 continues with data no firmware here reads: an unknown head,
-# then the section 4 +0x18 pass and a final 1 bit (03-road-network.md, section 6.7)
+kind 0x1B : dec_B(e4), no sentinel                       # RR only, DB-REL >= 27
+# DB-REL 34: one 1 bit, then zeros to the end of the block (read by no firmware)
 ```
 
 Annotated listings in `docs/fw/` (`mips_*.asm` for DB-REL 34, `m68k_pbp_decoders.asm`
@@ -334,8 +337,13 @@ Cross-check with bbox rules out coincidence.
 
 **Status**: all routing-relevant block types **resolved**.
 - `0x00` (map drawing): decoder verified on 1,200 blocks (1,200/1,200 readable names).
+  That check only covers pass `0x14`: passes `0x15`/`0x17` were misaligned until 2026-09-28;
+  now every CF=1 `0x00` block of 21708 and 21734 passes `oracle_00.py` (§9.11.12).
 - `0x0E` (road parcels): decoder + **encoder** (`encode_type0E`) — round-trip oracle 10/10 PASS 2026-09-19.
-- `0x14`/`0x15`/`0x16` (geo labels): decoder verified 2026-09-19, 1,958/1,958 records with X/Y in European range.
+- `0x14`–`0x16`, `0x1C`–`0x1E` (scale layers): every block of both DVDs passes the
+  structural oracle (§9.11.11). The 2026-09-19 claim "1,958/1,958 records with X/Y in
+  European range" was withdrawn: that check fails on plain blocks too, and the decoder
+  then in use was incomplete.
 
 Type `0x0E` oracle (2026-09-18): 67/67 CF=1 blocks pass structural validation
 (bad_D=0, bad_S2ptr=0) across usize 7–96. Key finding: m68k asm subroutines at
@@ -389,3 +397,188 @@ fixed widths.
 contains no zlib (no `inflate` tables) and never compares `COMPRESSION_FLAG` against
 0/1/2 — it tests `btst #0`. Its only proof was "length matches", refuted in
 [`05-failed-attempts.md`](05-failed-attempts.md) §9.9.1.
+
+## 9.11.11 Scale layers `0x14`–`0x16`, `0x1C`–`0x1E` — RoadRunner decoder (2026-09-28)
+
+**Dispatch.** `scripts/firmware/rr_cf1_dispatch.py` decodes the CF=1 jump table of
+RR `db_pub` (`bsw2` 0101, module at `0x917c8`): `sub_002a48` tests `hdr[6..7] & 0xf00`
+(`== 0x100` → table, `== 0x200` → zlib `sub_006ee8`), then `sltiu $ra, type, 0x2a`
+at `+0x2aa4`, table at `+0x2acc`:
+
+| types | case | decoder |
+|---|---|---|
+| `0x00` | `+0x2b74` | `sub_005e6c` |
+| `0x0E` | `+0x2b84` | `sub_003c9c` or `sub_003a3c` (byte `L+0x193`) |
+| `0x14`, `0x15`, `0x16`, `0x1C`, `0x1D`, `0x1E` | `+0x2bc8` | `sub_004b88` |
+| `0x29` | `+0x2bb8` | `sub_003e18` |
+| others < `0x2a` | `+0x2be4` | buffer cleared (`sub_00c198`) |
+
+Identical in `bsw2` 0101 BMWC01S, 0101 BMWM01S and 0103 BMWOCN (same `db_pub` bytes);
+0102 BMWOCN is an older `db_pub` (31 cases, no `0x29`) with the same grouping
+(`sub_004558`). The layout table seen by RR is `L = gp[-0x7f24]`, `L+0x14` DB-REL
+(`sub_002930`), `L+0x16` sub-revision (`sub_002980`), `T[id]` at `L + 0x1e + 2·id`
+(checked against the superblock: `L+0x98` = `T[0x3d]` = 52, `L+0x94/0x92/0x96` =
+`T[0x3b/0x3a/0x3c]` = 4/20/16, `L+0x9c` = `T[0x3f]` = 24).
+
+**`sub_004b88`**, with `sub_004228(dst, entry, recsize, kind, pass)` per section:
+
+```
+copy_raw(T[0x3d])                           prologue; pb_s3 = bits_needed(e3.count + 1)
+raw4 = copy_raw(4)                          [0] S2 +4 width, [1] S1 +4 width, [2] S3 delta width
+bits_init()
+S0 kind 0x80, S1 kind 0x7f, S2 kind 0x81    pass 0x0e
+S3 kind 0xae (8 B abs) | 0xac (4 B delta)   selector u16 at T[0x05]+T[0x3f]+0x10
+dec_text                                    sub_002ec8, same code as pbp+0x4862
+if DB-REL >= 0x14: w5 = 5 x getbits(8); e4 kind 0x17 (T[0x15]); S1, S2 pass 0x14
+if DB-REL >= 0x17: e5 kind 0x10 (T[0x59]); S1, S2 pass 0x17;
+                   if getbits(1): dec_text; if getbits(1): dec_text
+```
+
+`sub_004228` returns at once when `count == 0` (`+0x4280`) and runs count + 1 records
+for kinds `0x7f/0x80/0x81` (`+0x42a8..0x42dc`), count for the others. Fields per pass
+are in `carin/parser/cf1/decoder_14.py`; pass 0x14 on S1 reads `getbits(1) ?
+getbits(16) : getbits(w5[0])` and stores nothing (`+0x46ec..0x4720`).
+
+**What the CC-93 port got wrong** (`pbp+0x46aa`, the decoder used until 2026-09-28):
+it stopped after the first pass, so e4, e5, S1 `+0x10/+0x12` and S2 `+0x08..+0x0c`
+were never decoded; and it decoded one record of an empty S0/S1/S2 at the entry's
+offset 0, overwriting header and descriptor (sector 6449842 on 21708: `e1 = (0, 0)`,
+the S1 record written at 0 turns `e0` into `off = 17068`). With it, 0 of 25,988
+CF=1 blocks passed the oracle below.
+
+**One pass the firmware does not read.** After the last text flag, bits remain
+exactly in the blocks whose S2 is non-empty (17,775 of 25,988 CF=1 blocks on the two
+DVDs; none of the others). Plain blocks carry a S2 `+0x0e` u16 that no pass above
+writes. Reading, for each of the count + 1 S2 records, `getbits(1) ? getbits(16) :
+previous value` consumes every remaining set bit in all 17,775 blocks. Checks:
+the first record always carries a value (8,544/8,544 and 9,231/9,231); an explicit
+value never equals the previous one (28,634 and 29,109, none equal); the terminator
+ends at 0 (as on all plain blocks); plain blocks keep the previous value on 96.7%
+of records, packed ones on 96.9%. Example: sector 6128051 (21708, `0x16`, one S2
+record) ends `1 0000000011000100 1 0000000000000000`: `+0x0e` = 196, then 0. This is
+derived from the data, not from firmware (`decoder_14._s2_tail`); no available RR
+build reads it. Its meaning is unknown.
+
+**Oracle** — `scripts/routing/oracle_14_16.py`, independent of the decoder (layout from
+the descriptor and `vol.layout`). Checks and their source are listed in its
+docstring: sections contiguous from the prologue; S0 → S1/S2 on record boundaries
+(02-geo.md §8.4); S1/S2 → S3 on boundaries, non-decreasing, first/last = S3 start/end;
+S3 local points inside the bbox (`x << u16[0x32]`); S1 X/Y inside the disc range (union
+of the six types' bboxes); names at string starts; S2 `+8` on e4 boundaries; S1 `+0x12`,
+S2 `+0x0c` on e5 boundaries or 4; S1 `+0x10` = 0; S2 `+0x0e` terminator 0 and never
+changing to 0; for CF=1 also text ranges after the sections and zero padding after the
+last bit read.
+
+| disc | type | CF=0 | CF=2 | CF=1 |
+|---|---|---|---|---|
+| 21708 | `0x14` | 145/145 | 27/27 | 186/186 |
+| 21708 | `0x15` | 1,608/1,608 | 1,457/1,457 | 1,446/1,446 |
+| 21708 | `0x16` | 6,276/6,276 | 666/666 | 7,719/7,719 |
+| 21708 | `0x1C` | 579/579 | 564/564 | 318/318 |
+| 21708 | `0x1D` | 72/72 | 20/20 | 80/80 |
+| 21708 | `0x1E` | 38/38 | 1/1 | 14/14 |
+| 21734 | `0x14` | 96/96 | 51/51 | 250/250 |
+| 21734 | `0x15` | 992/992 | 1,628/1,628 | 2,265/2,265 |
+| 21734 | `0x16` | 3,840/3,840 | 983/983 | 11,049/11,049 |
+| 21734 | `0x1C` | 418/418 | 643/643 | 544/544 |
+| 21734 | `0x1D` | 40/40 | 44/44 | 103/103 |
+| 21734 | `0x1E` | 38/38 | 1/1 | 14/14 |
+
+The old check (S1 X/Y inside 20° W–50° E, 25–75° N, `--legacy-eu`) fails on 4,499 of
+10,116 plain `0x16` blocks (CF=0 2,530/6,276 on 21708, 1,969/3,840 on 21734): S1 X/Y
+are points of the whole disc (up to 196° E, 86° N), not of Europe. It was the ~17%
+CF=1 "anomaly" (1,002/7,719 and 2,295/11,049 with the new decoder, which passes
+everything else). `scripts/routing/layer_stats.py` compares CF=1 with CF=0/2 per type
+(category codes, records per section, S3 record size, named records).
+
+Not covered: 8-byte S3 records never occur on these discs (all 46,215 blocks use 4 B),
+so the absolute branch (`kind 0xae`) is transcribed but untested; DB-REL < 34 discs
+(CD-ID 2952, 21594) were not run here.
+
+## 9.11.12 Type `0x00` on the RoadRunner: pass `0x15` sentinel and pass `0x1B` (2026-09-28)
+
+`decode_type00` was ported from the **Mk3** (`db_pub+0x3d04`, 0127). The RR decoder of
+`0x00` is `sub_005e6c` (`bsw2` 0101, dispatch case `+0x2b74`,
+`scripts/firmware/rr_cf1_dispatch.py`); section helpers `sub_005038` (S0), `sub_0051e4`
+(S1), `sub_005378` (S2), `sub_005594` (S4, `kind` in `$a2`). Listing:
+`python scripts/firmware/mips_listing.py build/fw/V_2_RR_0101_BMWC01S_app_sw_bsw2 db_pub out.asm`.
+
+Pass by pass, the RR matches the port (prologue `T[0x0b]`, `PB_*` from `e2.count`,
+`e4/e7/e10/e11/e12.count + 1`, two raw widths, verbatim S3 (+1 record), S9, S10, S12 if
+`e12.count`; S0/S1/S2/S4 pass `0x14`; inline S5 `+0x6228`, S6 `+0x64e0` (14/16 bits by
+`subrel`, `+0x676c`), S7 `+0x6800`, S11 `+0x69e4` if `e11.count`; `dec_text` with **no**
+flag `+0x6a94`; if DB-REL ≥ `0x15`: `PB_s13`, S0 and S4 pass `0x15`, inline S13 `+0x6b68`;
+if DB-REL ≥ `0x17`: inline S14 `+0x6c40`, S2, S1, S0 pass `0x17`, two flagged `dec_text`
+`+0x6e08`/`+0x6e3c`), except for two points:
+
+1. **Pass `0x15` reads the sentinel record.** After the record loop, `sub_005594` reads the
+   sentinel's `+0x16` for `kind == 0x15` too (`+0x5db8..0x5e3c`: flag, then
+   `e13.off + getbits(PB_s13) · T[0x4c]`, else the previous record's). The Mk3 does the same
+   (`+0x3c50..0x3cd4`); the port stopped one record short. `docs/fw/mips_dec_B.asm` ends
+   before that code.
+2. **Pass `0x1B`.** `sub_005e6c +0x6e70`: if DB-REL ≥ `0x1B`, `sub_005594(dst, e4, 0x1b)`.
+   Per section 4 record, no sentinel (`+0x5b5c..0x5bc8`):
+   ```
+   if getbits(1): rec[0x18] = getbits(8); rec[0x19] = getbits(8)
+   else:          rec[0x18] = prev[0x18]; rec[0x19] = prev[0x19]
+   ```
+   The firmware's "previous" pointer starts at 0 (`+0x563c`), so a first record without the
+   flag would copy from address 0x18; on the discs the first flag is always set. The pass is
+   in RR 0101 BMWC01S/BMWM01S and 0103 (`+0x6e80`) and 0102 (`+0x6850`), in no Mk3 build
+   (0103, 0107, 0116, 0127: no `slti …, 0x1b` in `db_pub`).
+
+**Effect of point 1.** Without the sentinel bit(s) every later read is shifted: S13, pass
+`0x17` (S14 name index, S0/S1/S2 offsets) and the two text flags come out wrong. With the
+port as it was, **0 of 86,107 (21708) and 0 of 91,651 (21734)** CF=1 tiles passed the oracle
+below; every one failed `s4_ptr` (sentinel `+0x16` = 0) and `names` (S14). The misread flags
+started `dec_text` with garbage ranges, which is what the `floor` guard in `dec_text` had been
+added against (the "~8% of blocks" overwrite). On the invariant sample (300 CF=1 tiles per
+disc, seed 1) `name_pointer_score` was 0.549 on sector 4072845 (21734): a spurious second
+`dec_text` (41043, 42240) wrote into the real name blob (40940, 43732); now 1.0.
+
+**After pass `0x1B`** every CF=1 tile of both discs holds exactly one 1 bit, then zeros to the
+end of the block. No firmware reads it. It is not an encoded sentinel record for pass `0x1B`:
+in the 300-tile samples the first segment is explicit in 300/300, an explicit value never
+equals the previous one (0 of 7,003 and 7,211), yet the 1 bit follows in the 240 and 226 tiles
+whose last segment is 0, where a sentinel `0x0000` would have been an explicit repeat.
+
+**The "head".** The earlier description of the packed `+0x18` pass (a head of unknown content,
+median 18 bits on CD-ID 21594, before the flag + u16 records) measured from the end of the
+misaligned pass `0x17`. Measured the same way with the old port on the 300-tile samples it is
+2–1,165 bits, median 23 (21708) and 24 (21734). In the aligned stream the gap is the two
+`dec_text` flags, plus a text blob when the second one is set (31/300 and 43/300 tiles; the
+first flag was never set). Those blobs hold exonyms: sector 3522859 (21734) `seviglia`,
+`sevil'ya`, `sevilha`, `seville`, `sewilla`; sector 5766936 (21708) `norrbotten` in six
+languages.
+
+**Oracle** — `scripts/codec_cf1/oracle_00.py`, independent of the decoder (layout from the
+descriptor and `vol.layout`; checks in its docstring): sections in index order from
+`T[0x0b]`, 4-byte aligned, S3/S4 with count + 1 records; S4 → S5/S6 nodes, → S7 (non-decreasing,
+sentinel = S7 end), → S4 next segments, → S10/S12/S13/S11 (non-decreasing, sentinel = end);
+S4 → S2; S5/S6 → S4; names at string starts (S2, S14); pass `0x17` S1 `+6/+8` on S14 boundaries
+and S0 `+4`, S2 `+6/+8` non-decreasing; `+0x18` low byte 0 and sentinel 0; for CF=1, text
+ranges after the sections and, after the last bit read, one 1 bit and zeros.
+
+| disc | CF=0 | CF=2 | CF=1 (before) | CF=1 (now) |
+|---|---|---|---|---|
+| 21708 | 858/858 | 4,791/4,791 | 0/86,107 | 86,107/86,107 |
+| 21734 | 809/809 | 6,895/6,895 | 0/91,651 | 91,651/91,651 |
+
+**`+0x18` against the plain tiles** (`scripts/codec_cf1/pass18_baseline.py`, plain by default,
+`--cf 1` for the decoder's output; 21708 / 21734):
+
+| | plain (CF=0/2) | packed (CF=1) |
+|---|---|---|
+| segments | 2,643,784 / 3,791,013 | 39,760,087 / 42,299,606 |
+| values (high byte) | 1–7, `0x10`–`0x13` (+ `0x14` ×2 on 21734) | 1–7, `0x10`–`0x14` |
+| `+0x19` (low byte) | always 0 | always 0 |
+| `+0x18 & 3` = role from `+0x0B` | 99.89% / 99.75% | 99.95% / 99.90% |
+| exceptions | only role 0 with `& 3` ≠ 0 | same, only that direction |
+| repeats previous segment | 94.7% / 94.5% | 95.3% / 95.0% |
+| first segment non-zero | 4.5% / 3.9% | 1.9% / 2.0% |
+
+Two differences are not explained: `0x0400` is more frequent on class 5 (plain 12.3%, packed
+36.2% on 21708; 13.6% / 40.9% on 21734), and packed tiles carry `0x0400` on classes 0–2
+(137 and 2,079 segments; plain 0 and 5). In a 10,000-tile sample the latter sit in few tiles
+(5 on 21708, 14 on 21734) near the end of the `0x00` sector range (21734: sectors
+6,284,872–6,285,447), mostly class 0 with `+0x0B` 0xB, `+0x11` `0x20`.
